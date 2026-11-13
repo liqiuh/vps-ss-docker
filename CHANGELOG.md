@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 - 2026-11-13
+
+- Pull the public GHCR release image by default on new VPS installations.
+- Automatically fall back to the Docker Hub mirror when GHCR is unavailable.
+- Keep local builds and custom registries available through `BUILD_LOCAL` and `SS_IMAGE`.
+
 ## 1.1.0 - 2026-11-13
 
 - Add `cloudflare-vps-prep.json` import and automatic discovery.

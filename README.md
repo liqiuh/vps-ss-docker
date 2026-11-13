@@ -25,6 +25,9 @@ sudo ./vps-ss.sh
 2) 安装/切换无 Cloudflare 直连模式
 ```
 
+脚本默认拉取 `ghcr.io/liqiuh/vps-ss-docker:1.1.1`；如果 GHCR 不可达，会自动回退到
+`docker.io/macro1996/vps-ss:1.1.1`，新 VPS 无需在本地编译镜像。
+
 如果使用 Cloudflare，推荐先用 Codex Skill `$cloudflare-vps-prep` 在浏览器中生成固定格式的
 `cloudflare-vps-prep.json`，然后上传到 VPS：
 
@@ -233,8 +236,8 @@ docker buildx create --use --name vps-ss-builder 2>/dev/null || docker buildx us
 docker buildx build \
   --pull \
   --platform linux/amd64,linux/arm64 \
-  --build-arg IMAGE_VERSION=1.1.0 \
-  -t docker.io/你的账号/vps-ss:1.1.0 \
+  --build-arg IMAGE_VERSION=1.1.1 \
+  -t docker.io/你的账号/vps-ss:1.1.1 \
   -t docker.io/你的账号/vps-ss:latest \
   --provenance=true \
   --sbom=true \
@@ -244,7 +247,7 @@ docker buildx build \
 新 VPS 直接拉取你的镜像，不再现场构建：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.1.0 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install cloudflare
 ```
@@ -252,7 +255,7 @@ sudo -E ./vps-ss.sh install cloudflare
 或：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.1.0 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install direct
 ```

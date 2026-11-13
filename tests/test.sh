@@ -42,6 +42,17 @@ valid_worker_name worker-name || test_fail "valid Worker name rejected"
 valid_ws_path /ws-test_1 || test_fail "valid WebSocket path rejected"
 valid_origin_token abcdefghijklmnop || test_fail "valid origin token rejected"
 
+SS_IMAGE="$DEFAULT_SS_IMAGE"
+FALLBACK_SS_IMAGE="$DEFAULT_FALLBACK_SS_IMAGE"
+BUILD_LOCAL="0"
+docker() {
+  [[ "$1" == "pull" ]] || return 1
+  [[ "$2" == "$FALLBACK_SS_IMAGE" ]]
+}
+prepare_image >/dev/null
+assert_eq "$SS_IMAGE" "$DEFAULT_FALLBACK_SS_IMAGE"
+unset -f docker
+
 prep="${tmp}/cloudflare-vps-prep.json"
 jq -n '{
   schema: "vps-ss-cloudflare-prep/v1",
@@ -71,7 +82,7 @@ CONFIG_FILE="${INSTALL_DIR}/config.json"
 NGINX_FILE="${INSTALL_DIR}/nginx.conf.template"
 WORKER_FILE="${INSTALL_DIR}/worker.js"
 MODE="cloudflare"
-SS_IMAGE="local/vps-ss:1.1.0"
+SS_IMAGE="local/vps-ss:1.1.1"
 BUILD_LOCAL="1"
 SS_PASSWORD="test-password"
 CIPHER="chacha20-ietf-poly1305"

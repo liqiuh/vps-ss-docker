@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vps-ss}"
 SETTINGS_FILE="${SETTINGS_FILE:-${INSTALL_DIR}/.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-${INSTALL_DIR}/compose.yaml}"
@@ -32,7 +32,10 @@ OVERRIDE_CF_PREP_FILE="${CF_PREP_FILE-}"
 OVERRIDE_CF_API_TOKEN="${CF_API_TOKEN-}"
 
 MODE="${MODE:-}"
-SS_IMAGE="${SS_IMAGE:-local/vps-ss:1.1.0}"
+DEFAULT_SS_IMAGE="ghcr.io/liqiuh/vps-ss-docker:1.1.1"
+DEFAULT_FALLBACK_SS_IMAGE="docker.io/macro1996/vps-ss:1.1.1"
+SS_IMAGE="${SS_IMAGE:-$DEFAULT_SS_IMAGE}"
+FALLBACK_SS_IMAGE="${FALLBACK_SS_IMAGE-$DEFAULT_FALLBACK_SS_IMAGE}"
 BUILD_LOCAL="${BUILD_LOCAL:-}"
 SS_PASSWORD="${SS_PASSWORD:-}"
 CIPHER="${CIPHER:-chacha20-ietf-poly1305}"
@@ -305,7 +308,7 @@ write_dockerfile() {
 
 ARG V2RAY_PLUGIN_VERSION=1.5.0
 ARG SSSERVER_VERSION=v1.25.0
-ARG IMAGE_VERSION=1.1.0
+ARG IMAGE_VERSION=1.1.1
 
 FROM alpine:3.22 AS plugin
 ARG TARGETARCH
@@ -362,7 +365,14 @@ prepare_image() {
     docker build --pull -t "$SS_IMAGE" "$INSTALL_DIR"
   else
     info "拉取镜像: ${SS_IMAGE}"
-    docker pull "$SS_IMAGE"
+    if ! docker pull "$SS_IMAGE"; then
+      if [[ "$SS_IMAGE" != "$DEFAULT_SS_IMAGE" || -z "$FALLBACK_SS_IMAGE" ]]; then
+        die "无法拉取镜像: $SS_IMAGE"
+      fi
+      warn "GHCR 拉取失败，改用 Docker Hub 镜像: ${FALLBACK_SS_IMAGE}"
+      SS_IMAGE="$FALLBACK_SS_IMAGE"
+      docker pull "$SS_IMAGE" || die "两个公共镜像仓库均拉取失败。"
+    fi
   fi
 }
 
@@ -1015,8 +1025,9 @@ VPS Shadowsocks Docker 管理脚本 v${VERSION}
   vps-ss help                     显示帮助
 
 常用环境变量:
-  SS_IMAGE=docker.io/你的账号/vps-ss:1.1.0
-  BUILD_LOCAL=0                   从仓库拉取镜像，不在 VPS 构建
+  SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1
+  BUILD_LOCAL=0                   指定其他仓库镜像；默认自动使用官方公共镜像
+  FALLBACK_SS_IMAGE=...           GHCR 失败时的备用镜像；设为空可禁用回退
   DIRECT_PORT=8388
   ORIGIN_PORT=8080
   ORIGIN_HOST=origin.example.com  可选，需为 DNS only 并指向 VPS
