@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add a bilingual use and legal notice without changing the rights granted by the MIT License.
+
 ## 1.2.1 - 2026-11-13
 
 - Disable the anonymous Docker Hub fallback because the mirror is now private.
