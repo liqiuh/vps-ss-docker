@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="${ROOT}/vps-ss.sh"
-IMAGE="${IMAGE:-local/vps-ss:1.1.1-test}"
+IMAGE="${IMAGE:-local/vps-ss:1.2.0-test}"
 PROJECT_SUFFIX="${RANDOM}-$$"
 CF_PROJECT="vps-ss-cf-${PROJECT_SUFFIX}"
 DIRECT_PROJECT="vps-ss-direct-${PROJECT_SUFFIX}"

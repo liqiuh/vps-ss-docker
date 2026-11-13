@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vps-ss}"
 SETTINGS_FILE="${SETTINGS_FILE:-${INSTALL_DIR}/.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-${INSTALL_DIR}/compose.yaml}"
@@ -32,8 +32,8 @@ OVERRIDE_CF_PREP_FILE="${CF_PREP_FILE-}"
 OVERRIDE_CF_API_TOKEN="${CF_API_TOKEN-}"
 
 MODE="${MODE:-}"
-DEFAULT_SS_IMAGE="ghcr.io/liqiuh/vps-ss-docker:1.1.1"
-DEFAULT_FALLBACK_SS_IMAGE="docker.io/macro1996/vps-ss:1.1.1"
+DEFAULT_SS_IMAGE="ghcr.io/liqiuh/vps-ss-docker:1.2.0"
+DEFAULT_FALLBACK_SS_IMAGE="docker.io/macro1996/vps-ss:1.2.0"
 SS_IMAGE="${SS_IMAGE:-$DEFAULT_SS_IMAGE}"
 FALLBACK_SS_IMAGE="${FALLBACK_SS_IMAGE-$DEFAULT_FALLBACK_SS_IMAGE}"
 BUILD_LOCAL="${BUILD_LOCAL:-}"
@@ -146,6 +146,10 @@ valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
 }
 
+valid_ss_password() {
+  [[ "$1" =~ ^[A-Za-z0-9._~!@%+=,:/-]{8,128}$ ]]
+}
+
 valid_ipv4() {
   local ip="$1" octet
   local -a octets
@@ -176,6 +180,33 @@ valid_ws_path() {
 
 valid_origin_token() {
   [[ "$1" =~ ^[A-Za-z0-9._~-]{16,128}$ ]]
+}
+
+prompt_install_options() {
+  local entered=""
+  if [[ "$MODE" == "cloudflare" ]]; then
+    read -r -p "VPS 源站 TCP 端口 [${ORIGIN_PORT}]: " entered
+    ORIGIN_PORT="${entered:-$ORIGIN_PORT}"
+    valid_port "$ORIGIN_PORT" || die "ORIGIN_PORT 无效，必须是 1-65535。"
+  else
+    read -r -p "Shadowsocks 对外 TCP/UDP 端口 [${DIRECT_PORT}]: " entered
+    DIRECT_PORT="${entered:-$DIRECT_PORT}"
+    valid_port "$DIRECT_PORT" || die "DIRECT_PORT 无效，必须是 1-65535。"
+  fi
+
+  entered=""
+  if [[ -n "$SS_PASSWORD" ]]; then
+    IFS= read -r -s -p "Shadowsocks 密码 [回车保留当前密码]: " entered
+  else
+    IFS= read -r -s -p "Shadowsocks 密码 [回车自动生成强随机密码]: " entered
+  fi
+  printf '\n'
+  [[ -z "$entered" ]] || SS_PASSWORD="$entered"
+  if [[ -n "$SS_PASSWORD" ]]; then
+    valid_ss_password "$SS_PASSWORD" || {
+      die "密码必须为 8-128 位，只能包含字母、数字和 . _ ~ ! @ % + = , : / -"
+    }
+  fi
 }
 
 select_cloudflare_prep_file() {
@@ -308,7 +339,7 @@ write_dockerfile() {
 
 ARG V2RAY_PLUGIN_VERSION=1.5.0
 ARG SSSERVER_VERSION=v1.25.0
-ARG IMAGE_VERSION=1.1.1
+ARG IMAGE_VERSION=1.2.0
 
 FROM alpine:3.22 AS plugin
 ARG TARGETARCH
@@ -726,7 +757,7 @@ install_manager() {
 
 install_mode() {
   require_root
-  local requested_mode="${1:-}" requested_prep="${2:-}"
+  local requested_mode="${1:-}" requested_prep="${2:-}" interactive_options="${3:-false}"
   if [[ -z "$requested_mode" && -t 0 ]]; then
     printf '1) Cloudflare Worker 模式\n2) 无 Cloudflare 直连模式\n'
     read -r -p "请选择模式 [1/2]: " requested_mode
@@ -735,10 +766,14 @@ install_mode() {
   case "$requested_mode" in cloudflare|direct) ;; *) die "模式必须是 cloudflare 或 direct。" ;; esac
   MODE="$requested_mode"
 
-  ensure_packages
   install -d -m 0750 "$INSTALL_DIR"
   load_settings
   MODE="$requested_mode"
+  if [[ "$interactive_options" == "true" ]]; then
+    prompt_install_options
+  fi
+
+  ensure_packages
 
   if [[ "$MODE" == "cloudflare" ]]; then
     if [[ -n "$requested_prep" ]]; then
@@ -749,6 +784,9 @@ install_mode() {
   fi
 
   SS_PASSWORD="${SS_PASSWORD:-$(random_hex 24)}"
+  valid_ss_password "$SS_PASSWORD" || {
+    die "SS_PASSWORD 必须为 8-128 位，只能包含字母、数字和 . _ ~ ! @ % + = , : / -"
+  }
   WS_PATH="${WS_PATH:-/$(random_hex 16)}"
   ORIGIN_TOKEN="${ORIGIN_TOKEN:-$(random_hex 32)}"
   valid_ws_path "$WS_PATH" || die "WS_PATH 必须以 / 开头，且只能包含字母、数字、/、-、_、.、~。"
@@ -1025,11 +1063,12 @@ VPS Shadowsocks Docker 管理脚本 v${VERSION}
   vps-ss help                     显示帮助
 
 常用环境变量:
-  SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1
+  SS_IMAGE=docker.io/你的账号/vps-ss:1.2.0
   BUILD_LOCAL=0                   指定其他仓库镜像；默认自动使用官方公共镜像
   FALLBACK_SS_IMAGE=...           GHCR 失败时的备用镜像；设为空可禁用回退
   DIRECT_PORT=8388
   ORIGIN_PORT=8080
+  SS_PASSWORD=...                 8-128 位安全字符；菜单模式可隐藏输入
   ORIGIN_HOST=origin.example.com  可选，需为 DNS only 并指向 VPS
   CF_ACCOUNT_ID=...
   CF_API_TOKEN_FILE=/root/cf-token
@@ -1059,8 +1098,8 @@ menu() {
 EOF
     read -r -p "请选择: " choice
     case "$choice" in
-      1) install_mode cloudflare ;;
-      2) install_mode direct ;;
+      1) install_mode cloudflare "" true ;;
+      2) install_mode direct "" true ;;
       3) start_service ;;
       4) stop_service ;;
       5) restart_service ;;

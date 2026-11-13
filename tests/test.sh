@@ -41,6 +41,23 @@ valid_worker_name worker-name || test_fail "valid Worker name rejected"
 ! valid_worker_name worker- || test_fail "trailing hyphen accepted"
 valid_ws_path /ws-test_1 || test_fail "valid WebSocket path rejected"
 valid_origin_token abcdefghijklmnop || test_fail "valid origin token rejected"
+valid_ss_password 'custom-pass_123!' || test_fail "valid password rejected"
+! valid_ss_password 'short' || test_fail "short password accepted"
+! valid_ss_password 'contains space' || test_fail "password with spaces accepted"
+
+MODE="direct"
+DIRECT_PORT="8388"
+SS_PASSWORD=""
+prompt_install_options <<< $'24443\ncustom-pass_123!\n' >/dev/null
+assert_eq "$DIRECT_PORT" "24443"
+assert_eq "$SS_PASSWORD" "custom-pass_123!"
+
+MODE="cloudflare"
+ORIGIN_PORT="8080"
+SS_PASSWORD="existing-password"
+prompt_install_options <<< $'\n\n' >/dev/null
+assert_eq "$ORIGIN_PORT" "8080"
+assert_eq "$SS_PASSWORD" "existing-password"
 
 SS_IMAGE="$DEFAULT_SS_IMAGE"
 FALLBACK_SS_IMAGE="$DEFAULT_FALLBACK_SS_IMAGE"
@@ -82,9 +99,9 @@ CONFIG_FILE="${INSTALL_DIR}/config.json"
 NGINX_FILE="${INSTALL_DIR}/nginx.conf.template"
 WORKER_FILE="${INSTALL_DIR}/worker.js"
 MODE="cloudflare"
-SS_IMAGE="local/vps-ss:1.1.1"
+SS_IMAGE="local/vps-ss:1.2.0"
 BUILD_LOCAL="1"
-SS_PASSWORD="test-password"
+SS_PASSWORD="Aa1._~!@%+=,:/-"
 CIPHER="chacha20-ietf-poly1305"
 WS_PATH="/test-path"
 ORIGIN_TOKEN="0123456789abcdef0123456789abcdef"
@@ -112,6 +129,8 @@ write_nginx_config
 write_worker
 write_compose
 unset -f chown
+
+assert_eq "$(jq -r '.password' "$CONFIG_FILE")" "$SS_PASSWORD"
 
 if command -v node >/dev/null 2>&1; then
   node --input-type=module --check < "$WORKER_FILE"

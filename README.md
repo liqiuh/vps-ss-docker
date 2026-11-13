@@ -11,9 +11,24 @@
 脚本支持 Ubuntu/Debian，要求使用 `root` 运行。首次运行会自动安装 Docker Engine、Compose、`jq`、
 `openssl` 和二维码工具。
 
+## 给别人或 AI 的入口
+
+对外分享这个稳定仓库地址即可：
+
+```text
+https://github.com/liqiuh/vps-ss-docker
+```
+
+不要把 `/tree/main` 或 `raw/main/vps-ss.sh` 当成固定发布地址直接执行；`main` 会持续更新。部署时应下载
+GitHub `Latest Release` 中的 `vps-ss.sh` 和 `SHA256SUMS`，校验成功后再运行。可以把
+[AI_DEPLOY.md](AI_DEPLOY.md) 连同仓库地址交给 AI，其中包含需要先向用户确认的模式、端口和防火墙检查项。
+
 ## 最简单的使用方法
 
 ```bash
+curl -fLO https://github.com/liqiuh/vps-ss-docker/releases/latest/download/vps-ss.sh
+curl -fLO https://github.com/liqiuh/vps-ss-docker/releases/latest/download/SHA256SUMS
+grep ' vps-ss.sh$' SHA256SUMS | sha256sum -c -
 chmod +x vps-ss.sh
 sudo ./vps-ss.sh
 ```
@@ -25,8 +40,11 @@ sudo ./vps-ss.sh
 2) 安装/切换无 Cloudflare 直连模式
 ```
 
-脚本默认拉取 `ghcr.io/liqiuh/vps-ss-docker:1.1.1`；如果 GHCR 不可达，会自动回退到
-`docker.io/macro1996/vps-ss:1.1.1`，新 VPS 无需在本地编译镜像。
+菜单会询问 VPS 对外端口，并隐藏输入 Shadowsocks 密码。端口直接回车使用默认值；密码直接回车会在
+首次安装时自动生成 48 位随机十六进制密码，重新安装时则保留现有密码。
+
+脚本默认拉取 `ghcr.io/liqiuh/vps-ss-docker:1.2.0`；如果 GHCR 不可达，会自动回退到
+`docker.io/macro1996/vps-ss:1.2.0`，新 VPS 无需在本地编译镜像。
 
 如果使用 Cloudflare，推荐先用 Codex Skill `$cloudflare-vps-prep` 在浏览器中生成固定格式的
 `cloudflare-vps-prep.json`，然后上传到 VPS：
@@ -151,7 +169,23 @@ my-account.workers.dev
 脚本会先自动查询。账户尚未设置时，脚本会询问你希望使用的名称，并尝试通过 API 创建。
 也可以提前在 Cloudflare 的 `Workers & Pages` 页面启用。
 
-### 5. VPS 入站端口
+## 防火墙和云安全组
+
+本机防火墙和 VPS 服务商的云安全组是两层独立规则，两边都必须允许。安装脚本只会自动修改已经启用的
+UFW 或 firewalld；自定义 nftables/iptables 规则以及云厂商安全组需要自行处理。
+
+| 用途 | Cloudflare 模式 | 无 Cloudflare 直连模式 |
+| --- | --- | --- |
+| SSH 管理 | TCP `22` 或当前自定义 SSH 端口 | TCP `22` 或当前自定义 SSH 端口 |
+| 服务入站 | TCP `8080`，或自定义 `ORIGIN_PORT` | TCP + UDP `8388`，或自定义 `DIRECT_PORT` |
+| VPS 的 TCP `443` | 不需要，TLS 在 Worker 终止 | 不需要，除非另有网站服务 |
+| VPS 的 UDP `8080` | 不需要 | 不适用 |
+
+不要在确认新规则生效前删除当前 SSH 放行规则，否则可能失去远程连接。Cloudflare 模式不需要对公网开放
+容器内部的 `8388`；直连模式也不需要开放 `8080`。如果 VPS 限制出站流量，还需要允许 DNS，以及出站
+TCP `80/443`，供系统软件源、Docker Registry 和 Cloudflare API 使用。
+
+### 5. Cloudflare 源站端口
 
 Cloudflare 模式默认源站端口为 TCP `8080`。脚本会处理已经启用的 UFW/firewalld，但云厂商控制台的
 安全组仍需要你确认：
@@ -191,6 +225,24 @@ DIRECT_PORT=24443 sudo -E ./vps-ss.sh install direct
 ```
 
 同时在 VPS 服务商的安全组放行相同的 TCP 和 UDP 端口。
+
+## 自定义端口和密码
+
+直接运行 `sudo ./vps-ss.sh` 时，菜单会交互询问端口和密码，这是推荐方式。自动化部署也可以使用环境变量：
+
+```bash
+# 直连模式
+DIRECT_PORT=24443 SS_PASSWORD='custom-pass_123!' \
+  sudo -E ./vps-ss.sh install direct
+
+# Cloudflare 模式；这是 Worker 回源到 VPS 的 TCP 端口，客户端仍连接 Worker 的 443
+ORIGIN_PORT=8880 SS_PASSWORD='custom-pass_123!' \
+  sudo -E ./vps-ss.sh install cloudflare /root/cloudflare-vps-prep.json
+```
+
+端口允许 `1-65535`。密码允许 `8-128` 位，只能使用字母、数字和
+`. _ ~ ! @ % + = , : / -`。为避免密码出现在 shell 历史中，人工部署优先使用菜单的隐藏输入；不指定密码时
+脚本会自动生成强随机密码。
 
 ## 日常管理
 
@@ -236,8 +288,8 @@ docker buildx create --use --name vps-ss-builder 2>/dev/null || docker buildx us
 docker buildx build \
   --pull \
   --platform linux/amd64,linux/arm64 \
-  --build-arg IMAGE_VERSION=1.1.1 \
-  -t docker.io/你的账号/vps-ss:1.1.1 \
+  --build-arg IMAGE_VERSION=1.2.0 \
+  -t docker.io/你的账号/vps-ss:1.2.0 \
   -t docker.io/你的账号/vps-ss:latest \
   --provenance=true \
   --sbom=true \
@@ -247,7 +299,7 @@ docker buildx build \
 新 VPS 直接拉取你的镜像，不再现场构建：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.2.0 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install cloudflare
 ```
@@ -255,7 +307,7 @@ sudo -E ./vps-ss.sh install cloudflare
 或：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.1.1 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.2.0 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install direct
 ```

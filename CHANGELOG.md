@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-11-13
+
+- Prompt for the public/origin port and a hidden custom password in menu-driven installations.
+- Validate custom passwords before writing configuration files.
+- Add an AI deployment handoff guide and an explicit firewall/security-group matrix.
+- Document the stable repository URL and recommend verified release assets instead of executing `main` directly.
+
 ## 1.1.1 - 2026-11-13
 
 - Pull the public GHCR release image by default on new VPS installations.
