@@ -53,11 +53,13 @@ sudo ./vps-ss.sh
 菜单会询问 VPS 对外端口，并隐藏输入 Shadowsocks 密码。端口直接回车使用默认值；密码直接回车会在
 首次安装时自动生成 48 位随机十六进制密码，重新安装时则保留现有密码。
 
-脚本默认拉取公开镜像 `ghcr.io/liqiuh/vps-ss-docker:1.2.1`，新 VPS 无需在本地编译。Docker Hub
+源码脚本默认拉取公开镜像 `ghcr.io/liqiuh/vps-ss-docker:1.3.0`，新 VPS 无需在本地编译。GitHub Release
+中的 `vps-ss.sh` 会进一步固定到该版本的多架构 manifest digest，推荐使用 Release 资产安装。Docker Hub
 镜像是维护者的私人备份，不作为匿名回退源。需要使用其他已登录的私有仓库时，可通过 `SS_IMAGE` 或
 `FALLBACK_SS_IMAGE` 显式指定。
 
-如果使用 Cloudflare，推荐先用 Codex Skill `$cloudflare-vps-prep` 在浏览器中生成固定格式的
+如果使用 Cloudflare，推荐先下载 Release 中的 `cloudflare-vps-prep-skill.tar.gz` 并安装其中的 Codex
+Skill `$cloudflare-vps-prep`，再在浏览器中生成固定格式的
 `cloudflare-vps-prep.json`，然后上传到 VPS：
 
 ```bash
@@ -99,8 +101,8 @@ sudo ./vps-ss.sh install direct
 }
 ```
 
-安装包内同时提供 `cloudflare-vps-prep.example.json` 作为结构参考。不要直接上传示例文件；推荐让
-`$cloudflare-vps-prep` Skill 生成包含真实账户信息且权限为 `0600` 的文件。
+仓库中的 `cloudflare-vps-prep.example.json` 仅作为结构参考。不要直接上传示例文件；推荐让 Release
+附带的 `$cloudflare-vps-prep` Skill 生成包含真实账户信息且权限为 `0600` 的文件。
 
 自动检测位置按顺序为：
 
@@ -133,7 +135,7 @@ CF_PREP_FILE=/安全路径/cloudflare-vps-prep.json sudo -E ./vps-ss.sh install 
 
 ```text
 Worker:  <脚本名>.<你的子域名>.workers.dev
-源站:    <VPS-IP>.sslip.io:8080
+源站:    <VPS-IP>.sslip.io:18080
 ```
 
 如果你以后要使用自己的域名，可以在 Cloudflare 给 Worker 绑定 Custom Domain，再执行：
@@ -188,26 +190,29 @@ UFW 或 firewalld；自定义 nftables/iptables 规则以及云厂商安全组�
 | 用途 | Cloudflare 模式 | 无 Cloudflare 直连模式 |
 | --- | --- | --- |
 | SSH 管理 | TCP `22` 或当前自定义 SSH 端口 | TCP `22` 或当前自定义 SSH 端口 |
-| 服务入站 | TCP `8080`，或自定义 `ORIGIN_PORT` | TCP + UDP `8388`，或自定义 `DIRECT_PORT` |
+| 服务入站 | TCP `18080`，或已有/自定义 `ORIGIN_PORT` | TCP + UDP `8388`，或自定义 `DIRECT_PORT` |
 | VPS 的 TCP `443` | 不需要，TLS 在 Worker 终止 | 不需要，除非另有网站服务 |
-| VPS 的 UDP `8080` | 不需要 | 不适用 |
+| VPS 的 UDP `18080` | 不需要 | 不适用 |
 
 不要在确认新规则生效前删除当前 SSH 放行规则，否则可能失去远程连接。Cloudflare 模式不需要对公网开放
-容器内部的 `8388`；直连模式也不需要开放 `8080`。如果 VPS 限制出站流量，还需要允许 DNS，以及出站
+容器内部的 `8388`；直连模式也不需要开放 `18080`。如果 VPS 限制出站流量，还需要允许 DNS，以及出站
 TCP `80/443`，供系统软件源、Docker Registry 和 Cloudflare API 使用。
 
 ### 5. Cloudflare 源站端口
 
-Cloudflare 模式默认源站端口为 TCP `8080`。脚本会处理已经启用的 UFW/firewalld，但云厂商控制台的
+Cloudflare 模式的新安装默认源站端口为 TCP `18080`，避免与常见 Web 服务端口冲突。已有安装会继续使用
+`/opt/vps-ss/.env` 中记录的端口，包括旧版本默认的 `8080`，不会自动迁移。脚本会处理已经启用的
+UFW/firewalld，但云厂商控制台的
 安全组仍需要你确认：
 
 ```text
-允许入站 TCP 8080
+允许入站 TCP 18080
 ```
 
 源站即使被扫描到也要求随机路径和 Worker 注入的随机 `X-Origin-Token`，普通请求只返回 `404`。
 
-如果 VPS 的 `8080` 已被占用，可以指定其他端口：
+安装前会同时检查 `ss` 监听状态和 Docker 端口映射。除当前 vps-ss 容器外，发现占用会在写配置前退出。
+需要指定其他端口时：
 
 ```bash
 ORIGIN_PORT=8880 sudo -E ./vps-ss.sh install cloudflare
@@ -270,16 +275,25 @@ vps-ss logs 100
 vps-ss follow
 vps-ss doctor
 vps-ss cf-deploy
+vps-ss cf-delete
+vps-ss uninstall --yes
+vps-ss uninstall --delete-worker --yes
 ```
+
+`vps-ss status` 会检查每个预期容器的健康状态和对应链路；任一检查失败时命令返回非零。Cloudflare 新部署
+完成时，外部传播超时会明确警告并允许稍后复查。
 
 配置和密钥保存在：
 
 ```text
 /opt/vps-ss/.env
 /opt/vps-ss/config.json
+/opt/vps-ss/state.json
 ```
 
-这两个文件只允许 root 或容器内指定用户读取。`vps-ss info` 默认隐藏密码；只有 `link`、`clash` 或
+敏感配置文件只允许 root 或容器内指定用户读取。`state.json` 只记录脚本实际创建的防火墙规则；卸载和
+模式切换不会删除无法证明归属的旧规则。默认卸载保留远端 Worker，只有显式使用 `cf-delete` 或
+`uninstall --delete-worker` 并提供有效 Token 才会调用 Cloudflare API 删除。`vps-ss info` 默认隐藏密码；只有 `link`、`clash` 或
 `info --show-secret` 会显示完整凭据。
 
 ## 使用你自己的 Docker 仓库
@@ -299,8 +313,8 @@ docker buildx create --use --name vps-ss-builder 2>/dev/null || docker buildx us
 docker buildx build \
   --pull \
   --platform linux/amd64,linux/arm64 \
-  --build-arg IMAGE_VERSION=1.2.1 \
-  -t docker.io/你的账号/vps-ss:1.2.1 \
+  --build-arg IMAGE_VERSION=1.3.0 \
+  -t docker.io/你的账号/vps-ss:1.3.0 \
   -t docker.io/你的账号/vps-ss:latest \
   --provenance=true \
   --sbom=true \
@@ -310,7 +324,7 @@ docker buildx build \
 新 VPS 直接拉取你的镜像，不再现场构建：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.2.1 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.3.0 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install cloudflare
 ```
@@ -318,27 +332,25 @@ sudo -E ./vps-ss.sh install cloudflare
 或：
 
 ```bash
-SS_IMAGE=docker.io/你的账号/vps-ss:1.2.1 \
+SS_IMAGE=docker.io/你的账号/vps-ss:1.3.0 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install direct
 ```
 
 ## 源码仓库与发布检查
 
-仓库已经包含 ShellCheck、Hadolint、Actionlint、单元测试、真实容器集成测试、双架构构建以及 Trivy
-高危漏洞阻断。Cloudflare 的 Nginx 源站和 Shadowsocks 服务使用同一个扫描过的发布镜像。发布前执行：
+仓库已经包含 ShellCheck、Hadolint、Actionlint、单元测试、真实 Shadowsocks TCP/WebSocket/UDP
+集成测试、双架构构建以及 Trivy 漏洞、配置和密钥扫描。Cloudflare 的 Nginx 源站和 Shadowsocks 服务
+使用同一个扫描过的发布镜像。发布前执行：
 
 ```bash
-make test
-make build
-make scan
-make integration
-make multiarch
+make verify
 ```
 
-`.github/workflows/ci.yml` 会在 push 和 pull request 时重复这些核心检查。
+`.github/workflows/ci.yml` 会在 push、pull request 和每周计划任务中重复这些核心检查。
 `.github/workflows/docker-publish.yml` 会在推送 `v*` 标签后，将 `linux/amd64` 和 `linux/arm64`
-镜像发布到 GHCR，并生成 provenance 和 SBOM。完整发布步骤见 `RELEASING.md`。
+镜像发布到公开 GHCR 和私有 Docker Hub 备份，生成 provenance、SBOM、固定 digest 的安装脚本、Skill
+压缩包和 `SHA256SUMS`，然后创建 GitHub Release。完整发布步骤见 `RELEASING.md`。
 
 项目使用 [MIT License](LICENSE)。
 
@@ -349,7 +361,7 @@ Cloudflare 模式的数据路径：
 ```text
 客户端
   -> Cloudflare Worker:443 (TLS + WebSocket)
-  -> VPS Docker Nginx:8080 (路径 + Origin Token 校验)
+  -> VPS:18080 -> Docker Nginx:8080 (路径 + Origin Token 校验)
   -> Shadowsocks Rust + v2ray-plugin:8388
   -> 目标网站
 ```

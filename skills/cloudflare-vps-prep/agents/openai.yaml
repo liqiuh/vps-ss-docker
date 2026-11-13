@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloudflare VPS 准备材料"
+  short_description: "配置 Cloudflare Workers 前置项并生成 VPS 安装材料"
+  default_prompt: "Use $cloudflare-vps-prep to configure my Cloudflare Workers prerequisites and generate the VPS preparation JSON file."

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vps-ss}"
 SETTINGS_FILE="${SETTINGS_FILE:-${INSTALL_DIR}/.env}"
+STATE_FILE="${STATE_FILE:-${INSTALL_DIR}/state.json}"
 COMPOSE_FILE="${COMPOSE_FILE:-${INSTALL_DIR}/compose.yaml}"
 CONFIG_FILE="${CONFIG_FILE:-${INSTALL_DIR}/config.json}"
 NGINX_FILE="${NGINX_FILE:-${INSTALL_DIR}/nginx.conf.template}"
@@ -32,7 +33,7 @@ OVERRIDE_CF_PREP_FILE="${CF_PREP_FILE-}"
 OVERRIDE_CF_API_TOKEN="${CF_API_TOKEN-}"
 
 MODE="${MODE:-}"
-DEFAULT_SS_IMAGE="ghcr.io/liqiuh/vps-ss-docker:1.2.1"
+DEFAULT_SS_IMAGE="ghcr.io/liqiuh/vps-ss-docker:1.3.0"
 DEFAULT_FALLBACK_SS_IMAGE=""
 SS_IMAGE="${SS_IMAGE:-$DEFAULT_SS_IMAGE}"
 FALLBACK_SS_IMAGE="${FALLBACK_SS_IMAGE-$DEFAULT_FALLBACK_SS_IMAGE}"
@@ -45,7 +46,7 @@ PUBLIC_IP="${PUBLIC_IP:-}"
 DIRECT_HOST="${DIRECT_HOST:-}"
 DIRECT_PORT="${DIRECT_PORT:-8388}"
 ORIGIN_HOST="${ORIGIN_HOST:-}"
-ORIGIN_PORT="${ORIGIN_PORT:-8080}"
+ORIGIN_PORT="${ORIGIN_PORT:-18080}"
 CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-}"
 CF_SCRIPT_NAME="${CF_SCRIPT_NAME:-}"
 CF_WORKERS_SUBDOMAIN="${CF_WORKERS_SUBDOMAIN:-}"
@@ -73,6 +74,8 @@ warn() { printf '%s\n' "${YELLOW}$*${NC}"; }
 fail() { printf '%s\n' "${RED}$*${NC}" >&2; }
 die() { fail "$*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+declare -a ADDED_FIREWALL_RULES=()
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "请使用 root 运行此命令。"
@@ -138,6 +141,73 @@ EOF
   chmod 0600 "$SETTINGS_FILE"
 }
 
+state_init() {
+  [[ -f "$STATE_FILE" ]] && return 0
+  install -d -m 0750 "$(dirname "$STATE_FILE")"
+  umask 077
+  jq -n '{schema:"vps-ss-state/v1", managed_firewall:{rules:[]}}' > "$STATE_FILE"
+  chmod 0600 "$STATE_FILE"
+}
+
+state_valid() {
+  [[ -f "$STATE_FILE" ]] || return 1
+  jq -e '
+    .schema == "vps-ss-state/v1" and
+    (.managed_firewall.rules | type == "array") and
+    all(.managed_firewall.rules[]?;
+      (.backend == "ufw" or .backend == "firewalld") and
+      (.port | type == "number") and
+      (.protocol == "tcp" or .protocol == "udp"))
+  ' "$STATE_FILE" >/dev/null 2>&1
+}
+
+state_update() {
+  local filter="$1" tmp
+  shift
+  state_init
+  state_valid || die "状态文件损坏: $STATE_FILE"
+  tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+  jq "$@" "$filter" "$STATE_FILE" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+state_rule_managed() {
+  local backend="$1" port="$2" proto="$3"
+  state_valid || return 1
+  jq -e --arg backend "$backend" --argjson port "$port" --arg proto "$proto" '
+    any(.managed_firewall.rules[]?;
+      .backend == $backend and .port == $port and .protocol == $proto)
+  ' "$STATE_FILE" >/dev/null
+}
+
+state_add_rule() {
+  local backend="$1" port="$2" proto="$3"
+  # shellcheck disable=SC2016 # jq variables are expanded by jq, not the shell.
+  state_update '
+    if any(.managed_firewall.rules[]?;
+      .backend == $backend and .port == $port and .protocol == $proto)
+    then .
+    else .managed_firewall.rules += [{backend:$backend, port:$port, protocol:$proto}]
+    end
+  ' --arg backend "$backend" --argjson port "$port" --arg proto "$proto"
+}
+
+state_remove_rule() {
+  local backend="$1" port="$2" proto="$3"
+  state_valid || return 0
+  # shellcheck disable=SC2016 # jq variables are expanded by jq, not the shell.
+  state_update '
+    .managed_firewall.rules |= map(select(
+      .backend != $backend or .port != $port or .protocol != $proto))
+  ' --arg backend "$backend" --argjson port "$port" --arg proto "$proto"
+}
+
+state_rules() {
+  state_valid || return 0
+  jq -r '.managed_firewall.rules[]? | [.backend, (.port|tostring), .protocol] | @tsv' "$STATE_FILE"
+}
+
 random_hex() {
   openssl rand -hex "$1"
 }
@@ -160,6 +230,27 @@ valid_ipv4() {
   done
 }
 
+valid_public_ipv4() {
+  local ip="$1" a b c d
+  valid_ipv4 "$ip" || return 1
+  IFS='.' read -r a b c d <<<"$ip"
+  a=$((10#$a)); b=$((10#$b)); c=$((10#$c)); d=$((10#$d))
+
+  ((a >= 1 && a <= 223)) || return 1
+  ((a != 10 && a != 127)) || return 1
+  ! ((a == 100 && b >= 64 && b <= 127)) || return 1
+  ! ((a == 169 && b == 254)) || return 1
+  ! ((a == 172 && b >= 16 && b <= 31)) || return 1
+  ! ((a == 192 && b == 168)) || return 1
+  ! ((a == 192 && b == 0 && c == 0)) || return 1
+  ! ((a == 192 && b == 0 && c == 2)) || return 1
+  ! ((a == 192 && b == 88 && c == 99)) || return 1
+  ! ((a == 198 && (b == 18 || b == 19))) || return 1
+  ! ((a == 198 && b == 51 && c == 100)) || return 1
+  ! ((a == 203 && b == 0 && c == 113)) || return 1
+  ! ((a == 255 && b == 255 && c == 255 && d == 255)) || return 1
+}
+
 valid_hostname() {
   local hostname="$1" label
   local -a labels
@@ -180,6 +271,20 @@ valid_ws_path() {
 
 valid_origin_token() {
   [[ "$1" =~ ^[A-Za-z0-9._~-]{16,128}$ ]]
+}
+
+valid_endpoint_host() {
+  if valid_ipv4 "$1"; then
+    valid_public_ipv4 "$1"
+  elif [[ "$1" =~ ^[0-9.]+$ ]]; then
+    return 1
+  else
+    valid_hostname "$1"
+  fi
+}
+
+yaml_scalar() {
+  jq -Rn --arg value "$1" '$value'
 }
 
 prompt_install_options() {
@@ -260,14 +365,18 @@ load_cloudflare_prep() {
 }
 
 detect_public_ipv4() {
-  local ip=""
+  local ip="" candidate
   ip="$(curl -4fsS --max-time 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null \
     | sed -n 's/^ip=//p' | head -n 1 || true)"
-  if ! valid_ipv4 "$ip"; then
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' \
-      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}')"
+  if ! valid_public_ipv4 "$ip"; then
+    while IFS= read -r candidate; do
+      if valid_public_ipv4 "$candidate"; then
+        ip="$candidate"
+        break
+      fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n' || true)
   fi
-  valid_ipv4 "$ip" || return 1
+  valid_public_ipv4 "$ip" || return 1
   printf '%s' "$ip"
 }
 
@@ -295,7 +404,7 @@ ensure_packages() {
 
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y ca-certificates curl jq openssl qrencode gnupg
+  apt-get install -y ca-certificates curl jq openssl qrencode gnupg iproute2
 
   local codename conflict conflicts=()
   codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
@@ -337,11 +446,13 @@ write_dockerfile() {
   cat > "${INSTALL_DIR}/Dockerfile" <<'EOF'
 # syntax=docker/dockerfile:1.7
 
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+ARG SSSERVER_IMAGE=ghcr.io/shadowsocks/ssserver-rust:v1.25.0@sha256:22240c07d8ce3a36421ede770bd775dcc5fc56d5d829943196957b05452dc36f
+ARG SSLOCAL_IMAGE=ghcr.io/shadowsocks/sslocal-rust:v1.25.0@sha256:56786760f6a1bc447c3bcdcac94d5e2e2ffdbdaacce14c38e819003d8bb125dc
 ARG V2RAY_PLUGIN_VERSION=1.5.0
-ARG SSSERVER_VERSION=v1.25.0
-ARG IMAGE_VERSION=1.2.1
+ARG IMAGE_VERSION=1.3.0
 
-FROM alpine:3.22 AS plugin
+FROM ${ALPINE_IMAGE} AS plugin
 ARG TARGETARCH
 ARG V2RAY_PLUGIN_VERSION
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -369,19 +480,27 @@ RUN apk add --no-cache ca-certificates tar wget \
     && cp "$(find /tmp/plugin -type f -name 'v2ray-plugin*' | head -n 1)" /out/v2ray-plugin \
     && chmod 0755 /out/v2ray-plugin
 
-FROM ghcr.io/shadowsocks/ssserver-rust:${SSSERVER_VERSION}
+FROM ${SSLOCAL_IMAGE} AS client
+# hadolint ignore=DL3017
+RUN apk upgrade --no-cache
+COPY --from=plugin /out/v2ray-plugin /usr/local/bin/v2ray-plugin
+
+FROM ${SSSERVER_IMAGE} AS server
 ARG V2RAY_PLUGIN_VERSION
 ARG IMAGE_VERSION
 # The same image also runs the unprivileged Cloudflare origin proxy. Keeping
 # both services in one scanned image avoids an untracked runtime dependency.
 # hadolint ignore=DL3017,DL3018
 RUN apk upgrade --no-cache \
-    && apk add --no-cache gettext-envsubst nginx
+    && apk add --no-cache busybox-extras gettext-envsubst nginx
 LABEL org.opencontainers.image.title="Shadowsocks Rust with v2ray-plugin" \
       org.opencontainers.image.description="Multi-mode Shadowsocks server for direct or Cloudflare WebSocket deployment" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       io.vps-ss.v2ray-plugin.version="${V2RAY_PLUGIN_VERSION}"
 COPY --from=plugin /out/v2ray-plugin /usr/local/bin/v2ray-plugin
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=6 \
+  CMD ["nc", "-z", "-w", "2", "127.0.0.1", "8388"]
+USER 65534:65534
 EOF
 }
 
@@ -537,6 +656,17 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -w 2 127.0.0.1 8388"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   origin:
     image: ${SS_IMAGE}
@@ -552,7 +682,8 @@ services:
         envsubst '\$\${ORIGIN_TOKEN}' < /etc/nginx/nginx.conf.template > /tmp/nginx.conf
         exec nginx -c /tmp/nginx.conf -g 'daemon off;'
     depends_on:
-      - ss
+      ss:
+        condition: service_healthy
     ports:
       - "${ORIGIN_PORT}:8080/tcp"
     volumes:
@@ -564,6 +695,17 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -w 2 127.0.0.1 8080"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
   else
     cat > "$COMPOSE_FILE" <<EOF
@@ -586,6 +728,17 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -w 2 127.0.0.1 8388"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
   fi
   chmod 0644 "$COMPOSE_FILE"
@@ -595,18 +748,196 @@ compose() {
   (cd "$INSTALL_DIR" && docker compose -f "$COMPOSE_FILE" "$@")
 }
 
-open_firewall_port() {
-  local port="$1" proto="$2"
-  if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "${port}/${proto}" >/dev/null
-    ok "UFW 已放行 ${port}/${proto}。"
+detect_firewall_backend() {
+  if have ufw && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; then
+    printf 'ufw'
   elif have firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null
-    firewall-cmd --reload >/dev/null
-    ok "firewalld 已放行 ${port}/${proto}。"
-  else
-    warn "未修改本机防火墙；请确认云厂商安全组已放行 ${port}/${proto}。"
+    printf 'firewalld'
   fi
+}
+
+firewall_rule_exists() {
+  local backend="$1" port="$2" proto="$3" output rc
+  case "$backend" in
+    ufw)
+      have ufw || return 2
+      output="$(LC_ALL=C ufw status 2>/dev/null)" || return 2
+      if grep -Eq "^[[:space:]]*${port}/${proto}[[:space:]]+ALLOW" <<<"$output"; then
+        return 0
+      fi
+      output="$(LC_ALL=C ufw show added 2>/dev/null)" || return 2
+      grep -Eq "^[[:space:]]*ufw allow ${port}/${proto}([[:space:]]|$)" <<<"$output"
+      ;;
+    firewalld)
+      have firewall-cmd || return 2
+      firewall-cmd --quiet --query-port="${port}/${proto}" 2>/dev/null
+      rc=$?
+      [[ "$rc" -eq 0 ]] && return 0
+      [[ "$rc" -eq 1 ]] || return 2
+      firewall-cmd --permanent --quiet --query-port="${port}/${proto}" 2>/dev/null
+      rc=$?
+      [[ "$rc" -eq 0 ]] && return 0
+      [[ "$rc" -eq 1 ]] && return 1
+      return 2
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+firewall_rule_add() {
+  local backend="$1" port="$2" proto="$3"
+  case "$backend" in
+    ufw) ufw allow "${port}/${proto}" >/dev/null ;;
+    firewalld)
+      firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null
+      firewall-cmd --reload >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+firewall_rule_remove() {
+  local backend="$1" port="$2" proto="$3"
+  case "$backend" in
+    ufw) ufw --force delete allow "${port}/${proto}" >/dev/null ;;
+    firewalld)
+      firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null
+      firewall-cmd --reload >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+open_firewall_port() {
+  local port="$1" proto="$2" backend rule_status
+  backend="$(detect_firewall_backend)"
+  if [[ -z "$backend" ]]; then
+    warn "未修改本机防火墙；请确认云厂商安全组已放行 ${port}/${proto}。"
+    return 0
+  fi
+  firewall_rule_exists "$backend" "$port" "$proto" && rule_status=0 || rule_status=$?
+  case "$rule_status" in
+    0)
+      if ! state_rule_managed "$backend" "$port" "$proto"; then
+        warn "${port}/${proto} 已由现有防火墙规则放行，脚本不会接管或自动删除该规则。"
+      fi
+      return 0
+      ;;
+    1) ;;
+    *)
+      fail "无法确认防火墙规则 ${port}/${proto} 的状态。"
+      return 1
+      ;;
+  esac
+  if ! firewall_rule_add "$backend" "$port" "$proto"; then
+    fail "无法添加防火墙规则 ${port}/${proto}。"
+    return 1
+  fi
+  if ! state_add_rule "$backend" "$port" "$proto"; then
+    firewall_rule_remove "$backend" "$port" "$proto" >/dev/null 2>&1 || true
+    fail "无法记录受管防火墙规则 ${port}/${proto}，已尝试撤销。"
+    return 1
+  fi
+  ADDED_FIREWALL_RULES+=("${backend}:${port}:${proto}")
+  ok "${backend} 已放行 ${port}/${proto}。"
+}
+
+remove_managed_firewall_rule() {
+  local backend="$1" port="$2" proto="$3" rule_status
+  state_rule_managed "$backend" "$port" "$proto" || return 0
+  firewall_rule_exists "$backend" "$port" "$proto" && rule_status=0 || rule_status=$?
+  case "$rule_status" in
+    0)
+      firewall_rule_remove "$backend" "$port" "$proto" || {
+        warn "无法删除受管防火墙规则 ${port}/${proto}。"
+        return 1
+      }
+      ;;
+    1) ;;
+    *)
+      warn "无法确认受管防火墙规则 ${port}/${proto} 是否仍存在，已保留状态记录。"
+      return 1
+      ;;
+  esac
+  state_remove_rule "$backend" "$port" "$proto"
+  ok "已删除受管防火墙规则 ${port}/${proto}。"
+}
+
+managed_rule_is_current() {
+  local port="$1" proto="$2"
+  if [[ "$MODE" == "cloudflare" ]]; then
+    [[ "$port" == "$ORIGIN_PORT" && "$proto" == "tcp" ]]
+  else
+    [[ "$port" == "$DIRECT_PORT" && ( "$proto" == "tcp" || "$proto" == "udp" ) ]]
+  fi
+}
+
+cleanup_stale_managed_firewall_rules() {
+  local backend port proto
+  while IFS=$'\t' read -r backend port proto; do
+    [[ -n "$backend" ]] || continue
+    if ! managed_rule_is_current "$port" "$proto"; then
+      remove_managed_firewall_rule "$backend" "$port" "$proto" || true
+    fi
+  done < <(state_rules)
+}
+
+remove_all_managed_firewall_rules() {
+  local backend port proto
+  while IFS=$'\t' read -r backend port proto; do
+    [[ -n "$backend" ]] || continue
+    remove_managed_firewall_rule "$backend" "$port" "$proto" || true
+  done < <(state_rules)
+}
+
+rollback_new_firewall_rules() {
+  local entry backend port proto
+  for entry in "${ADDED_FIREWALL_RULES[@]}"; do
+    IFS=: read -r backend port proto <<<"$entry"
+    remove_managed_firewall_rule "$backend" "$port" "$proto" || true
+  done
+  ADDED_FIREWALL_RULES=()
+}
+
+port_is_listening() {
+  local port="$1" proto="$2"
+  case "$proto" in
+    tcp) ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q . ;;
+    udp) ss -H -lun "sport = :${port}" 2>/dev/null | grep -q . ;;
+    *) return 1 ;;
+  esac
+}
+
+container_owns_port() {
+  local container="$1" port="$2" proto="$3"
+  docker inspect "$container" 2>/dev/null | jq -e --arg port "$port" --arg proto "$proto" '
+    .[0].NetworkSettings.Ports // {} |
+    to_entries[]? |
+    select(.key | endswith("/" + $proto)) |
+    .value[]? |
+    select(.HostPort == $port)
+  ' >/dev/null 2>&1
+}
+
+assert_host_port_available() {
+  local port="$1" proto="$2" container running_containers
+  running_containers="$(docker ps --format '{{.Names}}' 2>/dev/null)" || {
+    die "无法检查 Docker 端口映射，请确认 Docker 正常运行。"
+  }
+  while IFS= read -r container; do
+    [[ -n "$container" ]] || continue
+    if [[ "$container" != "$CONTAINER_NAME" && "$container" != "$ORIGIN_CONTAINER_NAME" ]] && \
+       container_owns_port "$container" "$port" "$proto"; then
+      die "主机端口 ${port}/${proto} 已被 Docker 容器 ${container} 占用，请通过环境变量指定其他端口。"
+    fi
+  done <<<"$running_containers"
+
+  port_is_listening "$port" "$proto" || return 0
+  if container_owns_port "$CONTAINER_NAME" "$port" "$proto" || \
+     container_owns_port "$ORIGIN_CONTAINER_NAME" "$port" "$proto"; then
+    return 0
+  fi
+  die "主机端口 ${port}/${proto} 已被其他服务占用，请通过环境变量指定其他端口。"
 }
 
 api_token_value() {
@@ -651,13 +982,14 @@ deploy_cloudflare_worker() {
     warn "已跳过 Cloudflare Worker 部署。稍后运行: vps-ss cf-deploy"
     return 0
   fi
+  CF_API_TOKEN="$token"
 
   verify_response="$(cf_request "$token" GET "/user/tokens/verify" || true)"
   if [[ "$(jq -r '.success // false' <<<"$verify_response" 2>/dev/null)" != "true" || \
         "$(jq -r '.result.status // empty' <<<"$verify_response" 2>/dev/null)" != "active" ]]; then
     fail "Cloudflare API Token 无效或已失效："
     jq -r '.errors[]?.message // empty' <<<"$verify_response" >&2 || true
-    exit 1
+    return 1
   fi
 
   if [[ -z "$CF_ACCOUNT_ID" && -t 0 ]]; then
@@ -693,7 +1025,7 @@ deploy_cloudflare_worker() {
     [[ "$(jq -r '.success // false' <<<"$subdomain_response" 2>/dev/null)" == "true" ]] || {
       fail "无法创建 workers.dev 子域名："
       jq -r '.errors[]?.message // empty' <<<"$subdomain_response" >&2 || true
-      exit 1
+      return 1
     }
   fi
 
@@ -727,7 +1059,9 @@ deploy_cloudflare_worker() {
   if [[ "$(jq -r '.success // false' "$response_file" 2>/dev/null)" != "true" ]]; then
     fail "Worker 上传失败："
     jq -r '.errors[]?.message // empty' "$response_file" >&2 || true
-    exit 1
+    rm -f "$metadata_file" "$response_file"
+    trap - EXIT
+    return 1
   fi
 
   enable_response="$(cf_request "$token" POST \
@@ -736,7 +1070,9 @@ deploy_cloudflare_worker() {
   if [[ "$(jq -r '.success // false' <<<"$enable_response" 2>/dev/null)" != "true" ]]; then
     fail "Worker 已上传，但启用 workers.dev 地址失败："
     jq -r '.errors[]?.message // empty' <<<"$enable_response" >&2 || true
-    exit 1
+    rm -f "$metadata_file" "$response_file"
+    trap - EXIT
+    return 1
   fi
 
   CF_PUBLIC_HOST="${CF_SCRIPT_NAME}.${CF_WORKERS_SUBDOMAIN}.workers.dev"
@@ -747,6 +1083,42 @@ deploy_cloudflare_worker() {
   ok "Cloudflare Worker 已部署: https://${CF_PUBLIC_HOST}"
 }
 
+delete_cloudflare_worker() {
+  require_root
+  require_install
+  load_settings
+
+  [[ -n "$CF_ACCOUNT_ID" ]] || die "未记录 Cloudflare Account ID。"
+  [[ -n "$CF_SCRIPT_NAME" ]] || die "未记录可删除的 Cloudflare Worker。"
+
+  local token verify_response delete_response
+  load_cloudflare_prep "" >/dev/null 2>&1 || true
+  token="$(api_token_value)"
+  [[ -n "$token" ]] || die "删除 Worker 需要 Cloudflare API Token。"
+  CF_API_TOKEN="$token"
+
+  verify_response="$(cf_request "$token" GET "/user/tokens/verify" || true)"
+  if [[ "$(jq -r '.success // false' <<<"$verify_response" 2>/dev/null)" != "true" || \
+        "$(jq -r '.result.status // empty' <<<"$verify_response" 2>/dev/null)" != "active" ]]; then
+    fail "Cloudflare API Token 无效或已失效。"
+    return 1
+  fi
+
+  delete_response="$(cf_request "$token" DELETE \
+    "/accounts/${CF_ACCOUNT_ID}/workers/scripts/${CF_SCRIPT_NAME}" || true)"
+  if [[ "$(jq -r '.success // false' <<<"$delete_response" 2>/dev/null)" != "true" ]]; then
+    fail "Cloudflare Worker 删除失败："
+    jq -r '.errors[]?.message // empty' <<<"$delete_response" >&2 || true
+    return 1
+  fi
+
+  ok "Cloudflare Worker 已删除: ${CF_SCRIPT_NAME}"
+  CF_SCRIPT_NAME=""
+  CF_PUBLIC_HOST=""
+  save_settings
+  unset token CF_API_TOKEN
+}
+
 install_manager() {
   local self
   self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || true)"
@@ -755,9 +1127,113 @@ install_manager() {
   fi
 }
 
+render_install_tree() {
+  local target="$1"
+  local INSTALL_DIR="$target"
+  local SETTINGS_FILE="${target}/.env"
+  local STATE_FILE="${target}/state.json"
+  local COMPOSE_FILE="${target}/compose.yaml"
+  local CONFIG_FILE="${target}/config.json"
+  local NGINX_FILE="${target}/nginx.conf.template"
+  local WORKER_FILE="${target}/worker.js"
+
+  install -d -m 0750 "$target"
+  state_init
+  write_dockerfile
+  prepare_image
+  write_server_config
+  if [[ "$MODE" == "cloudflare" ]]; then
+    write_nginx_config
+    write_worker
+  else
+    rm -f "$NGINX_FILE" "${target}/nginx.conf" "$WORKER_FILE"
+  fi
+  write_compose
+  save_settings
+  compose config >/dev/null
+}
+
+container_health_status() {
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null
+}
+
+wait_for_local_services() {
+  local status
+  local -a containers=("$CONTAINER_NAME")
+  [[ "$MODE" == "cloudflare" ]] && containers+=("$ORIGIN_CONTAINER_NAME")
+
+  for _ in $(seq 1 30); do
+    local all_healthy=1 container
+    for container in "${containers[@]}"; do
+      status="$(container_health_status "$container" || true)"
+      [[ "$status" == "healthy" ]] || all_healthy=0
+    done
+    [[ "$all_healthy" == "1" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+
+rollback_install_tree() {
+  local backup="$1" had_previous="$2" failed_tree
+  warn "安装未完成，正在恢复先前配置。"
+  rollback_new_firewall_rules
+  compose down --remove-orphans >/dev/null 2>&1 || true
+  failed_tree="$(mktemp -d "$(dirname "$INSTALL_DIR")/.vps-ss-failed.XXXXXX")"
+  rmdir "$failed_tree"
+  [[ -d "$INSTALL_DIR" ]] && mv "$INSTALL_DIR" "$failed_tree"
+  if [[ "$had_previous" == "1" && -d "${backup}/install" ]]; then
+    mv "${backup}/install" "$INSTALL_DIR"
+    compose up -d --remove-orphans >/dev/null 2>&1 || warn "旧配置已恢复，但容器未能自动启动。"
+  fi
+  if [[ -f "${backup}/manager-state" ]]; then
+    rm -f -- "$MANAGER_PATH" || warn "无法移除失败安装留下的管理命令。"
+    if [[ "$(<"${backup}/manager-state")" == "present" && -e "${backup}/manager" ]]; then
+      cp -a "${backup}/manager" "$MANAGER_PATH" || warn "无法恢复先前的管理命令。"
+    fi
+  fi
+  rm -rf -- "$failed_tree" "$backup"
+}
+
+restore_previous_worker() {
+  local previous_mode="$1" previous_worker="$2"
+  [[ "$previous_mode" == "cloudflare" && -n "$previous_worker" ]] || return 0
+  warn "正在尝试恢复先前的 Cloudflare Worker 配置。"
+  (
+    OVERRIDE_MODE=""
+    OVERRIDE_SS_IMAGE=""
+    OVERRIDE_BUILD_LOCAL=""
+    OVERRIDE_SS_PASSWORD=""
+    OVERRIDE_CIPHER=""
+    OVERRIDE_WS_PATH=""
+    OVERRIDE_ORIGIN_TOKEN=""
+    OVERRIDE_PUBLIC_IP=""
+    OVERRIDE_DIRECT_HOST=""
+    OVERRIDE_DIRECT_PORT=""
+    OVERRIDE_ORIGIN_HOST=""
+    OVERRIDE_ORIGIN_PORT=""
+    OVERRIDE_CF_ACCOUNT_ID=""
+    OVERRIDE_CF_SCRIPT_NAME=""
+    OVERRIDE_CF_WORKERS_SUBDOMAIN=""
+    OVERRIDE_CF_PUBLIC_HOST=""
+    OVERRIDE_CF_PREP_FILE=""
+    deploy_cloudflare_worker
+  ) || warn "旧 Worker 未能自动恢复，请检查 Cloudflare 配置。"
+}
+
+probe_cloudflare_with_retry() {
+  [[ -n "$CF_PUBLIC_HOST" ]] || return 0
+  for _ in $(seq 1 6); do
+    probe_websocket "https://${CF_PUBLIC_HOST}${WS_PATH}" && return 0
+    sleep 5
+  done
+  return 1
+}
+
 install_mode() {
   require_root
   local requested_mode="${1:-}" requested_prep="${2:-}" interactive_options="${3:-false}"
+  local parent stage backup had_previous=0 previous_mode="" previous_worker="" legacy_firewall_state=0
   if [[ -z "$requested_mode" && -t 0 ]]; then
     printf '1) Cloudflare Worker 模式\n2) 无 Cloudflare 直连模式\n'
     read -r -p "请选择模式 [1/2]: " requested_mode
@@ -766,7 +1242,10 @@ install_mode() {
   case "$requested_mode" in cloudflare|direct) ;; *) die "模式必须是 cloudflare 或 direct。" ;; esac
   MODE="$requested_mode"
 
-  install -d -m 0750 "$INSTALL_DIR"
+  if [[ -f "$SETTINGS_FILE" ]]; then
+    previous_mode="$(setting_get MODE)"
+    previous_worker="$(setting_get CF_SCRIPT_NAME)"
+  fi
   load_settings
   MODE="$requested_mode"
   if [[ "$interactive_options" == "true" ]]; then
@@ -792,42 +1271,94 @@ install_mode() {
   valid_ws_path "$WS_PATH" || die "WS_PATH 必须以 / 开头，且只能包含字母、数字、/、-、_、.、~。"
   valid_origin_token "$ORIGIN_TOKEN" || die "ORIGIN_TOKEN 格式无效，至少需要 16 个安全字符。"
   PUBLIC_IP="${PUBLIC_IP:-$(detect_public_ipv4 || true)}"
-  [[ -n "$PUBLIC_IP" ]] || die "无法检测公网 IPv4，请通过 PUBLIC_IP=... 指定。"
+  valid_public_ipv4 "$PUBLIC_IP" || die "无法检测有效公网 IPv4，请通过 PUBLIC_IP=... 指定。"
   DIRECT_HOST="${DIRECT_HOST:-$PUBLIC_IP}"
+  valid_endpoint_host "$DIRECT_HOST" || die "DIRECT_HOST 必须是有效公网 IPv4 或域名。"
 
   if [[ "$MODE" == "cloudflare" ]]; then
     valid_port "$ORIGIN_PORT" || die "ORIGIN_PORT 无效。"
     ORIGIN_HOST="${ORIGIN_HOST:-$(printf '%s.sslip.io' "${PUBLIC_IP//./-}")}"
     valid_hostname "$ORIGIN_HOST" || die "ORIGIN_HOST 无效。"
+    assert_host_port_available "$ORIGIN_PORT" tcp
   else
     valid_port "$DIRECT_PORT" || die "DIRECT_PORT 无效。"
+    assert_host_port_available "$DIRECT_PORT" tcp
+    assert_host_port_available "$DIRECT_PORT" udp
   fi
 
-  write_dockerfile
-  prepare_image
-  write_server_config
-  if [[ "$MODE" == "cloudflare" ]]; then
-    write_nginx_config
-    write_worker
-  else
-    rm -f "$NGINX_FILE" "${INSTALL_DIR}/nginx.conf"
+  if [[ -f "$STATE_FILE" ]] && ! state_valid; then
+    die "状态文件损坏，请先检查: $STATE_FILE"
+  elif [[ -f "$SETTINGS_FILE" && ! -f "$STATE_FILE" ]]; then
+    legacy_firewall_state=1
   fi
-  write_compose
-  save_settings
-  install_manager
 
-  compose config >/dev/null
-  compose up -d --remove-orphans
-  if [[ "$MODE" == "cloudflare" ]]; then
-    open_firewall_port "$ORIGIN_PORT" tcp
-    deploy_cloudflare_worker
-  else
-    open_firewall_port "$DIRECT_PORT" tcp
-    open_firewall_port "$DIRECT_PORT" udp
+  parent="$(dirname "$INSTALL_DIR")"
+  install -d -m 0750 "$parent"
+  stage="$(mktemp -d "${INSTALL_DIR}.stage.XXXXXX")"
+  chmod 0750 "$stage"
+  if [[ -d "$INSTALL_DIR" ]]; then
+    cp -a "${INSTALL_DIR}/." "$stage/"
+    had_previous=1
   fi
+
+  if ! render_install_tree "$stage"; then
+    rm -rf -- "$stage"
+    die "生成或校验安装配置失败，现有部署未修改。"
+  fi
+
+  backup="$(mktemp -d "${INSTALL_DIR}.backup.XXXXXX")"
+  if [[ -e "$MANAGER_PATH" ]]; then
+    printf 'present\n' > "${backup}/manager-state"
+    cp -a "$MANAGER_PATH" "${backup}/manager"
+  else
+    printf 'absent\n' > "${backup}/manager-state"
+  fi
+  if [[ "$had_previous" == "1" ]]; then
+    mv "$INSTALL_DIR" "${backup}/install"
+  fi
+  mv "$stage" "$INSTALL_DIR"
+
+  if ! compose up -d --remove-orphans || ! wait_for_local_services; then
+    rollback_install_tree "$backup" "$had_previous"
+    die "新容器未能正常启动，已尝试恢复先前部署。"
+  fi
+
+  if ! install_manager; then
+    rollback_install_tree "$backup" "$had_previous"
+    die "管理命令安装失败，已尝试恢复先前部署。"
+  fi
+
+  if [[ "$MODE" == "cloudflare" ]]; then
+    if ! open_firewall_port "$ORIGIN_PORT" tcp; then
+      rollback_install_tree "$backup" "$had_previous"
+      die "防火墙规则配置失败，已尝试恢复先前部署。"
+    fi
+    if ! deploy_cloudflare_worker; then
+      rollback_install_tree "$backup" "$had_previous"
+      restore_previous_worker "$previous_mode" "$previous_worker"
+      die "Cloudflare Worker 部署失败，已尝试恢复先前部署。"
+    fi
+  else
+    if ! open_firewall_port "$DIRECT_PORT" tcp || ! open_firewall_port "$DIRECT_PORT" udp; then
+      rollback_install_tree "$backup" "$had_previous"
+      die "防火墙规则配置失败，已尝试恢复先前部署。"
+    fi
+    if [[ -n "$previous_worker" ]]; then
+      warn "原 Cloudflare Worker 仍保留。如不再需要，请运行: vps-ss cf-delete"
+    fi
+  fi
+
+  cleanup_stale_managed_firewall_rules
+  if [[ "$legacy_firewall_state" == "1" ]]; then
+    warn "旧版本未记录防火墙规则归属；无法确认的遗留规则不会自动删除，请人工检查。"
+  fi
+  rm -rf -- "$backup"
 
   ok "安装完成。管理命令: vps-ss"
-  show_status
+  show_status true
+  if [[ "$MODE" == "cloudflare" && -n "$CF_PUBLIC_HOST" ]] && ! probe_cloudflare_with_retry; then
+    warn "Cloudflare WebSocket 暂未通过，可能仍在传播；稍后运行 vps-ss status 复查。"
+  fi
   printf '\n'
   show_link || true
 }
@@ -903,27 +1434,27 @@ show_clash() {
     cat <<EOF
 - name: Cloudflare-SS
   type: ss
-  server: ${CF_PUBLIC_HOST}
+  server: $(yaml_scalar "$CF_PUBLIC_HOST")
   port: 443
-  cipher: ${CIPHER}
-  password: ${SS_PASSWORD}
+  cipher: $(yaml_scalar "$CIPHER")
+  password: $(yaml_scalar "$SS_PASSWORD")
   udp: false
   plugin: v2ray-plugin
   plugin-opts:
     mode: websocket
     tls: true
-    host: ${CF_PUBLIC_HOST}
-    path: ${WS_PATH}
+    host: $(yaml_scalar "$CF_PUBLIC_HOST")
+    path: $(yaml_scalar "$WS_PATH")
     mux: true
 EOF
   else
     cat <<EOF
 - name: Direct-SS
   type: ss
-  server: ${DIRECT_HOST}
+  server: $(yaml_scalar "$DIRECT_HOST")
   port: ${DIRECT_PORT}
-  cipher: ${CIPHER}
-  password: ${SS_PASSWORD}
+  cipher: $(yaml_scalar "$CIPHER")
+  password: $(yaml_scalar "$SS_PASSWORD")
   udp: true
 EOF
   fi
@@ -945,39 +1476,58 @@ probe_websocket() {
 show_status() {
   require_install
   load_settings
+  local allow_external_failure="${1:-false}" failed=0 container status
+  local -a expected_containers=("$CONTAINER_NAME")
+  [[ "$MODE" == "cloudflare" ]] && expected_containers+=("$ORIGIN_CONTAINER_NAME")
   docker info >/dev/null 2>&1 || die "Docker 未运行。"
   info "===== 容器状态 ====="
-  compose ps
+  compose ps || failed=1
+  for container in "${expected_containers[@]}"; do
+    status="$(container_health_status "$container" || true)"
+    if [[ "$status" == "healthy" ]]; then
+      ok "${container}: healthy"
+    else
+      fail "${container}: ${status:-missing}"
+      failed=1
+    fi
+  done
   info "===== 连通性检查 ====="
   if [[ "$MODE" == "cloudflare" ]]; then
     if probe_websocket "http://127.0.0.1:${ORIGIN_PORT}${WS_PATH}" "$ORIGIN_TOKEN"; then
       ok "本地源站 WebSocket: 正常 (101)"
     else
       fail "本地源站 WebSocket: 失败"
+      failed=1
     fi
     if [[ -n "$CF_PUBLIC_HOST" ]]; then
       if probe_websocket "https://${CF_PUBLIC_HOST}${WS_PATH}"; then
         ok "Cloudflare WebSocket: 正常 (101)"
       else
         warn "Cloudflare WebSocket: 暂未通过（部署传播或外部防火墙可能尚未完成）"
+        [[ "$allow_external_failure" == "true" ]] || failed=1
       fi
     else
       warn "Cloudflare Worker: 尚未部署"
+      [[ "$allow_external_failure" == "true" ]] || failed=1
     fi
   else
     if timeout 3 bash -c "</dev/tcp/127.0.0.1/${DIRECT_PORT}" 2>/dev/null; then
       ok "直连 TCP 端口: 正常"
     else
       fail "直连 TCP 端口: 失败"
+      failed=1
     fi
   fi
+  return "$failed"
 }
 
 start_service() {
   require_root
   require_install
+  load_settings
   systemctl start docker
   compose up -d
+  wait_for_local_services || die "服务启动后未在预期时间内通过健康检查。"
   show_status
 }
 
@@ -991,7 +1541,9 @@ stop_service() {
 restart_service() {
   require_root
   require_install
+  load_settings
   compose restart
+  wait_for_local_services || die "服务重启后未在预期时间内通过健康检查。"
   show_status
 }
 
@@ -1032,6 +1584,43 @@ set_public_host() {
   ok "客户端域名已更新为: $CF_PUBLIC_HOST"
 }
 
+uninstall_service() {
+  require_root
+  require_install
+  local delete_worker=false assume_yes=false arg answer=""
+  for arg in "$@"; do
+    case "$arg" in
+      --delete-worker) delete_worker=true ;;
+      --yes|-y) assume_yes=true ;;
+      *) die "未知卸载参数: $arg" ;;
+    esac
+  done
+
+  load_settings
+  if [[ "$assume_yes" != "true" ]]; then
+    [[ -t 0 ]] || die "非交互卸载必须指定 --yes。"
+    read -r -p "确认删除本地 vps-ss 配置和容器？输入 uninstall 继续: " answer
+    [[ "$answer" == "uninstall" ]] || die "已取消卸载。"
+  fi
+
+  if [[ "$delete_worker" == "true" && -n "$CF_SCRIPT_NAME" ]]; then
+    delete_cloudflare_worker || die "远端 Worker 删除失败，本地部署未删除。"
+    load_settings
+  elif [[ -n "$CF_SCRIPT_NAME" ]]; then
+    warn "Cloudflare Worker ${CF_SCRIPT_NAME} 将被保留。"
+  fi
+
+  compose down --remove-orphans
+  if ! state_valid; then
+    warn "未找到有效的受管防火墙状态；旧版本遗留规则不会自动删除，请人工检查。"
+  fi
+  remove_all_managed_firewall_rules
+  [[ "$INSTALL_DIR" != "/" && -n "$INSTALL_DIR" ]] || die "拒绝删除不安全的安装目录。"
+  rm -rf -- "$INSTALL_DIR"
+  rm -f -- "$MANAGER_PATH"
+  ok "本地 vps-ss 部署已卸载；Docker 镜像仍保留。"
+}
+
 build_image_command() {
   require_root
   ensure_packages
@@ -1058,16 +1647,18 @@ VPS Shadowsocks Docker 管理脚本 v${VERSION}
   vps-ss follow                   持续查看日志
   vps-ss doctor                   诊断服务
   vps-ss cf-deploy                部署或更新 Cloudflare Worker
+  vps-ss cf-delete                删除脚本记录的 Cloudflare Worker
   vps-ss set-host <域名>          使用已绑定到 Worker 的自定义域名
+  vps-ss uninstall [选项]         卸载本地服务；--delete-worker 同时删除 Worker
   vps-ss image-build [镜像名]     构建 Docker 镜像
   vps-ss help                     显示帮助
 
 常用环境变量:
-  SS_IMAGE=docker.io/你的账号/vps-ss:1.2.1
+  SS_IMAGE=docker.io/你的账号/vps-ss:1.3.0
   BUILD_LOCAL=0                   指定其他仓库镜像；默认自动使用官方公共镜像
   FALLBACK_SS_IMAGE=...           可选备用镜像；默认禁用
   DIRECT_PORT=8388
-  ORIGIN_PORT=8080
+  ORIGIN_PORT=18080
   SS_PASSWORD=...                 8-128 位安全字符；菜单模式可隐藏输入
   ORIGIN_HOST=origin.example.com  可选，需为 DNS only 并指向 VPS
   CF_ACCOUNT_ID=...
@@ -1094,6 +1685,8 @@ menu() {
 10) 查看日志
 11) 重新部署 Cloudflare Worker
 12) 诊断
+13) 删除 Cloudflare Worker
+14) 卸载本地服务
 0) 退出
 EOF
     read -r -p "请选择: " choice
@@ -1110,6 +1703,8 @@ EOF
       10) show_logs 100 ;;
       11) deploy_cloudflare_worker ;;
       12) doctor ;;
+      13) delete_cloudflare_worker ;;
+      14) uninstall_service ;;
       0) return 0 ;;
       *) warn "无效选项。" ;;
     esac
@@ -1131,7 +1726,9 @@ main() {
     follow) follow_logs ;;
     doctor) doctor ;;
     cf-deploy) deploy_cloudflare_worker ;;
+    cf-delete) delete_cloudflare_worker ;;
     set-host) set_public_host "${2:-}" ;;
+    uninstall) shift; uninstall_service "$@" ;;
     image-build) build_image_command "${2:-}" ;;
     help|-h|--help) show_help ;;
     "") menu ;;

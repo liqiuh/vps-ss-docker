@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -13,37 +16,54 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck jq curl python3
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq curl python3 python3-yaml
 
       - name: Run unit tests
         run: make test
 
       - name: Build native image
-        run: docker build --pull -t local/vps-ss:ci .
+        run: |
+          docker build --pull -t local/vps-ss:ci .
+          docker build --pull --target client -t local/vps-ss-client:ci .
+
+      - name: Scan repository configuration and secrets
+        run: make scan-source
 
       - name: Scan release candidate
-        run: make scan IMAGE=local/vps-ss:ci
+        run: |
+          make scan IMAGE=local/vps-ss:ci
+          make scan-client CLIENT_IMAGE=local/vps-ss-client:ci
 
       - name: Run integration tests
         env:
           IMAGE: local/vps-ss:ci
+          CLIENT_IMAGE: local/vps-ss-client:ci
           SKIP_BUILD: "1"
         run: bash tests/integration.sh
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Verify multi-architecture build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify multi-architecture client build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: client
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha

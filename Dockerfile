@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+ARG SSSERVER_IMAGE=ghcr.io/shadowsocks/ssserver-rust:v1.25.0@sha256:22240c07d8ce3a36421ede770bd775dcc5fc56d5d829943196957b05452dc36f
+ARG SSLOCAL_IMAGE=ghcr.io/shadowsocks/sslocal-rust:v1.25.0@sha256:56786760f6a1bc447c3bcdcac94d5e2e2ffdbdaacce14c38e819003d8bb125dc
 ARG V2RAY_PLUGIN_VERSION=1.5.0
-ARG SSSERVER_VERSION=v1.25.0
-ARG IMAGE_VERSION=1.2.1
+ARG IMAGE_VERSION=1.3.0
 
-FROM alpine:3.22 AS plugin
+FROM ${ALPINE_IMAGE} AS plugin
 ARG TARGETARCH
 ARG V2RAY_PLUGIN_VERSION
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -32,16 +34,24 @@ RUN apk add --no-cache ca-certificates tar wget \
     && cp "$(find /tmp/plugin -type f -name 'v2ray-plugin*' | head -n 1)" /out/v2ray-plugin \
     && chmod 0755 /out/v2ray-plugin
 
-FROM ghcr.io/shadowsocks/ssserver-rust:${SSSERVER_VERSION}
+FROM ${SSLOCAL_IMAGE} AS client
+# hadolint ignore=DL3017
+RUN apk upgrade --no-cache
+COPY --from=plugin /out/v2ray-plugin /usr/local/bin/v2ray-plugin
+
+FROM ${SSSERVER_IMAGE} AS server
 ARG V2RAY_PLUGIN_VERSION
 ARG IMAGE_VERSION
 # The same image also runs the unprivileged Cloudflare origin proxy. Keeping
 # both services in one scanned image avoids an untracked runtime dependency.
 # hadolint ignore=DL3017,DL3018
 RUN apk upgrade --no-cache \
-    && apk add --no-cache gettext-envsubst nginx
+    && apk add --no-cache busybox-extras gettext-envsubst nginx
 LABEL org.opencontainers.image.title="Shadowsocks Rust with v2ray-plugin" \
       org.opencontainers.image.description="Multi-mode Shadowsocks server for direct or Cloudflare WebSocket deployment" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       io.vps-ss.v2ray-plugin.version="${V2RAY_PLUGIN_VERSION}"
 COPY --from=plugin /out/v2ray-plugin /usr/local/bin/v2ray-plugin
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=6 \
+  CMD ["nc", "-z", "-w", "2", "127.0.0.1", "8388"]
+USER 65534:65534
