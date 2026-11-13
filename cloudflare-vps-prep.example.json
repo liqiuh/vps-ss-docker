@@ -1,0 +1,12 @@
+{
+  "schema": "vps-ss-cloudflare-prep/v1",
+  "cloudflare": {
+    "account_id": "0123456789abcdef0123456789abcdef",
+    "workers_subdomain": "replace-with-your-subdomain",
+    "api_token": "REPLACE_ME"
+  },
+  "metadata": {
+    "created_at": "2026-11-13T00:00:00Z",
+    "created_by": "cloudflare-vps-prep"
+  }
+}

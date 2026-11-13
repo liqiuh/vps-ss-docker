@@ -1,0 +1,12 @@
+# Secret-bearing preparation files
+cloudflare-vps-prep.json
+*.token
+.env
+
+# Local build and test output
+*.tar
+*.tar.gz
+*.log
+.DS_Store
+work/
+dist/

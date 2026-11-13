@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq curl python3
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build native image
+        run: docker build --pull -t local/vps-ss:ci .
+
+      - name: Scan release candidate
+        run: make scan IMAGE=local/vps-ss:ci
+
+      - name: Run integration tests
+        env:
+          IMAGE: local/vps-ss:ci
+          SKIP_BUILD: "1"
+        run: bash tests/integration.sh
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Verify multi-architecture build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
