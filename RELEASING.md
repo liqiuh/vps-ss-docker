@@ -26,11 +26,11 @@ ghcr.io/OWNER/REPOSITORY
 Push a semantic-version tag:
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.2.1
+git push origin v1.2.1
 ```
 
-The workflow publishes matching version tags to GHCR and `docker.io/macro1996/vps-ss`, with provenance and an SBOM.
+The workflow publishes matching version tags to public GHCR and the private `docker.io/macro1996/vps-ss` mirror, with provenance and an SBOM.
 New GHCR packages may initially be private; change the package visibility to public in the repository or organization package settings when public pulls are required.
 
 Before publishing, configure the GitHub Actions repository secret `DOCKERHUB_TOKEN` with a Docker Hub access token that can write to `macro1996/vps-ss`.
@@ -45,8 +45,8 @@ docker buildx create --use --name vps-ss-builder 2>/dev/null || docker buildx us
 docker buildx build \
   --pull \
   --platform linux/amd64,linux/arm64 \
-  --build-arg IMAGE_VERSION=1.2.0 \
-  -t docker.io/USERNAME/vps-ss:1.2.0 \
+  --build-arg IMAGE_VERSION=1.2.1 \
+  -t docker.io/USERNAME/vps-ss:1.2.1 \
   -t docker.io/USERNAME/vps-ss:latest \
   --provenance=true \
   --sbom=true \
@@ -56,7 +56,7 @@ docker buildx build \
 ## Use A Published Image
 
 ```bash
-SS_IMAGE=ghcr.io/OWNER/REPOSITORY:1.2.0 \
+SS_IMAGE=ghcr.io/OWNER/REPOSITORY:1.2.1 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install cloudflare /root/cloudflare-vps-prep.json
 ```
@@ -64,7 +64,7 @@ sudo -E ./vps-ss.sh install cloudflare /root/cloudflare-vps-prep.json
 Direct mode uses the same image:
 
 ```bash
-SS_IMAGE=ghcr.io/OWNER/REPOSITORY:1.2.0 \
+SS_IMAGE=ghcr.io/OWNER/REPOSITORY:1.2.1 \
 BUILD_LOCAL=0 \
 sudo -E ./vps-ss.sh install direct
 ```

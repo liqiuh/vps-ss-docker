@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 - 2026-11-13
+
+- Disable the anonymous Docker Hub fallback because the mirror is now private.
+- Keep GHCR as the public default image for shared deployments.
+- Retain optional custom fallback support for authenticated private registries.
+
 ## 1.2.0 - 2026-11-13
 
 - Prompt for the public/origin port and a hidden custom password in menu-driven installations.

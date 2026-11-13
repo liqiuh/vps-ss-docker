@@ -1,4 +1,4 @@
-IMAGE ?= local/vps-ss:1.2.0
+IMAGE ?= local/vps-ss:1.2.1
 SHELLCHECK_IMAGE ?= koalaman/shellcheck:stable@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
 HADOLINT_IMAGE ?= hadolint/hadolint:latest-alpine@sha256:a1d49ae1a4e83c1dbad26b8c1ad7588c8bd1e04f4866b34ad3cac50335198552
 ACTIONLINT_IMAGE ?= rhysd/actionlint:latest@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

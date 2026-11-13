@@ -60,14 +60,22 @@ assert_eq "$ORIGIN_PORT" "8080"
 assert_eq "$SS_PASSWORD" "existing-password"
 
 SS_IMAGE="$DEFAULT_SS_IMAGE"
-FALLBACK_SS_IMAGE="$DEFAULT_FALLBACK_SS_IMAGE"
+FALLBACK_SS_IMAGE=""
 BUILD_LOCAL="0"
+docker() { return 1; }
+if (prepare_image >/dev/null 2>&1); then
+  test_fail "default image failure unexpectedly succeeded without fallback"
+fi
+unset -f docker
+
+SS_IMAGE="$DEFAULT_SS_IMAGE"
+FALLBACK_SS_IMAGE="docker.io/example/private-vps-ss:1.2.1"
 docker() {
   [[ "$1" == "pull" ]] || return 1
   [[ "$2" == "$FALLBACK_SS_IMAGE" ]]
 }
 prepare_image >/dev/null
-assert_eq "$SS_IMAGE" "$DEFAULT_FALLBACK_SS_IMAGE"
+assert_eq "$SS_IMAGE" "$FALLBACK_SS_IMAGE"
 unset -f docker
 
 prep="${tmp}/cloudflare-vps-prep.json"
@@ -99,7 +107,7 @@ CONFIG_FILE="${INSTALL_DIR}/config.json"
 NGINX_FILE="${INSTALL_DIR}/nginx.conf.template"
 WORKER_FILE="${INSTALL_DIR}/worker.js"
 MODE="cloudflare"
-SS_IMAGE="local/vps-ss:1.2.0"
+SS_IMAGE="local/vps-ss:1.2.1"
 BUILD_LOCAL="1"
 SS_PASSWORD="Aa1._~!@%+=,:/-"
 CIPHER="chacha20-ietf-poly1305"
