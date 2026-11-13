@@ -86,7 +86,7 @@ render_mode() {
     write_compose
   )
 
-  docker run --rm --entrypoint sh -v "${dir}:/data" "$IMAGE" -c '
+  docker run --rm --user 0:0 --entrypoint sh -v "${dir}:/data" "$IMAGE" -c '
     chown 65534:65534 /data/config.json
     chmod 0600 /data/config.json
     if [ -f /data/nginx.conf.template ]; then
